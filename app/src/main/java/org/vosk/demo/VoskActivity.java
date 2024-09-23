@@ -16,13 +16,19 @@ package org.vosk.demo;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipboardManager;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
+import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.widget.ToggleButton;
 
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.vosk.LibVosk;
 import org.vosk.LogLevel;
 import org.vosk.Model;
@@ -39,8 +45,7 @@ import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-public class VoskActivity extends Activity implements
-        RecognitionListener {
+public class VoskActivity extends Activity {
 
     static private final int STATE_START = 0;
     static private final int STATE_READY = 1;
@@ -54,7 +59,68 @@ public class VoskActivity extends Activity implements
     private Model model;
     private SpeechService speechService;
     private SpeechStreamService speechStreamService;
-    private TextView resultView;
+    private EditText resultView;
+    private RecognitionListener recognitionListener;
+    private boolean debug = false;
+
+    private RecognitionListener getRecognitionListener() {
+        if (recognitionListener == null) {
+            recognitionListener = new RecognitionListener() {
+                private String getJsonValue(String jsonStr, String key) {
+                    try {
+                        return new JSONObject(jsonStr).getString(key);
+                    } catch (JSONException e) {
+                        return e.getMessage() + "\n" + jsonStr;
+                    }
+                }
+
+                @Override
+                public void onPartialResult(String hypothesis) {
+                    if (!debug) return;
+                    String result = getJsonValue(hypothesis, "partial");
+                    if (result.trim().equals("")) return;
+                    resultView.append("partial: " + result + "\n");
+                }
+
+                @Override
+                public void onResult(String hypothesis) {
+                    String result = getJsonValue(hypothesis, "text");
+                    if (result.trim().equals("")) return;
+                    if (debug){
+                        resultView.append("result: " + result + "\n");
+                    } else {
+                        resultView.append(result + "\n");
+                    }
+                }
+
+                @Override
+                public void onFinalResult(String hypothesis) {
+                    String result = getJsonValue(hypothesis, "text");
+                    if (result.trim().equals("")) return;
+                    if (debug){
+                        resultView.append("final result: " + result + "\n");
+                    } else {
+                        resultView.append(result + "\n");
+                    }
+                    setUiState(STATE_DONE);
+                    if (speechStreamService != null) {
+                        speechStreamService = null;
+                    }
+                }
+
+                @Override
+                public void onError(Exception exception) {
+                    setErrorState(exception.getMessage());
+                }
+
+                @Override
+                public void onTimeout() {
+                    setUiState(STATE_DONE);
+                }
+            };
+        }
+        return recognitionListener;
+    }
 
     @Override
     public void onCreate(Bundle state) {
@@ -68,6 +134,29 @@ public class VoskActivity extends Activity implements
         findViewById(R.id.recognize_file).setOnClickListener(view -> recognizeFile());
         findViewById(R.id.recognize_mic).setOnClickListener(view -> recognizeMicrophone());
         ((ToggleButton) findViewById(R.id.pause)).setOnCheckedChangeListener((view, isChecked) -> pause(isChecked));
+        findViewById(R.id.debug).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                debug = !debug;
+                ((Button)view).setText(debug ? "debug off" : "debug on");
+            }
+        });
+        findViewById(R.id.copy).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                String result = resultView.getText().toString();
+                if (result.trim().equals("")) return;
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                clipboard.setText(result);
+                Toast.makeText(VoskActivity.this, "Copied", Toast.LENGTH_SHORT).show();
+            }
+        });
+        findViewById(R.id.clear).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                resultView.setText("");
+            }
+        });
 
         LibVosk.setLogLevel(LogLevel.INFO);
 
@@ -79,16 +168,6 @@ public class VoskActivity extends Activity implements
             initModel();
         }
     }
-
-    private void initModel() {
-        StorageService.unpack(this, "model-en-us", "model",
-                (model) -> {
-                    this.model = model;
-                    setUiState(STATE_READY);
-                },
-                (exception) -> setErrorState("Failed to unpack the model" + exception.getMessage()));
-    }
-
 
     @Override
     public void onRequestPermissionsResult(int requestCode,
@@ -106,6 +185,15 @@ public class VoskActivity extends Activity implements
         }
     }
 
+    private void initModel() {
+        StorageService.unpack(this, "vosk-model-small-ja-0.22", "model",
+                (model) -> {
+                    this.model = model;
+                    setUiState(STATE_READY);
+                },
+                (exception) -> setErrorState("Failed to unpack the model" + exception.getMessage()));
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
@@ -118,35 +206,6 @@ public class VoskActivity extends Activity implements
         if (speechStreamService != null) {
             speechStreamService.stop();
         }
-    }
-
-    @Override
-    public void onResult(String hypothesis) {
-        resultView.append(hypothesis + "\n");
-    }
-
-    @Override
-    public void onFinalResult(String hypothesis) {
-        resultView.append(hypothesis + "\n");
-        setUiState(STATE_DONE);
-        if (speechStreamService != null) {
-            speechStreamService = null;
-        }
-    }
-
-    @Override
-    public void onPartialResult(String hypothesis) {
-        resultView.append(hypothesis + "\n");
-    }
-
-    @Override
-    public void onError(Exception e) {
-        setErrorState(e.getMessage());
-    }
-
-    @Override
-    public void onTimeout() {
-        setUiState(STATE_DONE);
     }
 
     private void setUiState(int state) {
@@ -182,7 +241,8 @@ public class VoskActivity extends Activity implements
                 break;
             case STATE_MIC:
                 ((Button) findViewById(R.id.recognize_mic)).setText(R.string.stop_microphone);
-                resultView.setText(getString(R.string.say_something));
+//                resultView.setText(getString(R.string.say_something));
+                resultView.setText("");
                 findViewById(R.id.recognize_file).setEnabled(false);
                 findViewById(R.id.recognize_mic).setEnabled(true);
                 findViewById(R.id.pause).setEnabled((true));
@@ -215,7 +275,7 @@ public class VoskActivity extends Activity implements
                 if (ais.skip(44) != 44) throw new IOException("File too short");
 
                 speechStreamService = new SpeechStreamService(rec, ais, 16000);
-                speechStreamService.start(this);
+                speechStreamService.start(getRecognitionListener());
             } catch (IOException e) {
                 setErrorState(e.getMessage());
             }
@@ -232,7 +292,7 @@ public class VoskActivity extends Activity implements
             try {
                 Recognizer rec = new Recognizer(model, 16000.0f);
                 speechService = new SpeechService(rec, 16000.0f);
-                speechService.startListening(this);
+                speechService.startListening(getRecognitionListener());
             } catch (IOException e) {
                 setErrorState(e.getMessage());
             }
